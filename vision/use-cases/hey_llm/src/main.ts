@@ -19,13 +19,14 @@ import type {GenerateContentResponse} from '@google-cloud/vertexai';
 
 /**
  * Vertex AI location. Change this const if you want to use another location.
+ * us-central1 is chosen as default to currently provide the most model availability. See [Vertex AI locations documentation](https://cloud.google.com/vertex-ai/docs/general/locations) for more details.
  */
-const LOCATION = 'asia-northeast1';
+const LOCATION = 'us-central1';
 
 /**
  * Default Gemini model to use.
  */
-const DEFAULT_GEMINI_MODEL = 'gemini-1.5-flash';
+const DEFAULT_GEMINI_MODEL = 'gemini-2.0-flash';
 
 /**
  * Default Imagen model to use.
@@ -52,6 +53,12 @@ const PRESET_OAUTH_CLIENT_SECRET = null;
  * If null, a new folder will be created.
  */
 const PRESET_DRIVE_FOLDER_ID = null;
+
+/**
+ * Maximum cache duration for GAS CacheService.
+ * Reference: https://developers.google.com/apps-script/reference/cache/cache
+ */
+const CACHE_EXPIRATION_IN_SECONDS = 21600;
 
 /**
  * Property service middleware.
@@ -227,7 +234,7 @@ function setClientSecret(val: string) {
  * @param {string} input The input data to process based on the instruction.
  * @param {string[][]} context Optional context that LLM should be aware of.
  *   You can specify a cell range that includes examples, reference data, etc.
- * @param {string} model The Gemini model version to use (default: gemini-1.5-flash).
+ * @param {string} model The Gemini model version to use (default: gemini-2.0-flash).
  *   See https://cloud.google.com/vertex-ai/generative-ai/docs/learn/models for available models.
  * @return {string} The LLM's response, trimmed and ready for use in a spreadsheet cell.
  * @customFunction
@@ -296,11 +303,11 @@ Output:`;
   });
   const result: GenerateContentResponse = JSON.parse(res.getContentText());
   if (!(result.candidates && result.candidates[0].content.parts[0].text)) {
-    Logger.log(result);
+    Logger.log(payload, result);
     throw new Error('Request to Gemini failed. ' + res.getContentText());
   }
   const out = result.candidates[0].content.parts[0].text.trim();
-  cache?.put(cacheKey, out);
+  cache?.put(cacheKey, out, CACHE_EXPIRATION_IN_SECONDS);
   return out;
 }
 
@@ -310,7 +317,7 @@ Output:`;
  * @returns Sanitized file name
  */
 function sanitizeFileName(filename: string) {
-  return filename.replace(/[/\\?%*:|'"<>]/g, '_');
+  return filename.replace(/[/\\?%*:|'"<>#]/g, '_');
 }
 
 /**
@@ -342,7 +349,7 @@ function checkDriveImage_(
   } = JSON.parse(res.getContentText());
 
   if (!response.files) {
-    Logger.log(response);
+    Logger.log(url, response);
     throw new Error(
       'No files included in the response. ' + res.getContentText(),
     );
@@ -403,7 +410,7 @@ ${base64image}
   );
   const result: {thumbnailLink?: string} = JSON.parse(res.getContentText());
   if (!result.thumbnailLink) {
-    Logger.log(payload, result);
+    Logger.log(JSON.stringify(metadata), result);
     throw new Error(
       'Uploading image to Drive failed. Is Drive API enabled? ' +
         res.getContentText(),
@@ -434,12 +441,13 @@ function getScriptName_(oauth: GoogleAppsScriptOAuth2.OAuth2Service) {
     headers: {
       Authorization: 'Bearer ' + oauth.getAccessToken(),
     },
+    muteHttpExceptions: true,
   });
   const result: {name?: string} = JSON.parse(res.getContentText());
   if (!result.name) {
-    Logger.log(result);
+    Logger.log(url, result);
     throw new Error(
-      'Request to Drive failed. Is Drive API enabled? ' + res.getContentText(),
+      'Script name not found. Is Drive API enabled? ' + res.getContentText(),
     );
   }
   return result.name;
@@ -551,6 +559,8 @@ function IMAGEN(
   model = DEFAULT_IMAGEN_MODEL,
   aspectRatio = DEFAULT_ASPECT_RATIO,
 ) {
+  if (!prompt) return '';
+
   // If user specifies a blank string for model, it falls back to the default model.
   model = model ? model : DEFAULT_IMAGEN_MODEL;
 
@@ -571,7 +581,7 @@ function IMAGEN(
   if (!PropService.driveFolderID) {
     PropService.driveFolderID = createDriveFolder_(oauthService);
   }
-  const filename = sanitizeFileName(`${cacheKey}:${prompt.slice(0, 64)}.png`);
+  const filename = sanitizeFileName(`${cacheKey}_${prompt.slice(0, 64)}.png`);
   const driveUrl = checkDriveImage_(
     oauthService,
     filename,
@@ -594,6 +604,8 @@ function IMAGEN(
     thumbnailLink.indexOf('=') > -1
       ? thumbnailLink.split('=').slice(0, -1).join('')
       : thumbnailLink;
+
+  // Short cache duration is set intentionally because the thumbnail link might expire.
   cache?.put(cacheKey, url);
   return url;
 }
